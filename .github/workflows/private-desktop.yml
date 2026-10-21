@@ -1,4 +1,5 @@
 name: Temporary encrypted Mac validation session
+# Check both local and relayed SSH banners before publishing a handoff.
 on:
   workflow_dispatch:
   push:
