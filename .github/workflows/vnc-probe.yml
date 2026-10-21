@@ -1,0 +1,47 @@
+name: Local remote-desktop protocol check
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/vnc-probe.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.event.repository.private == false
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Test native desktop service on disposable runner
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, secrets, socket, subprocess, time
+          tool = "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+          report = {}
+          password = secrets.token_hex(4)
+          try:
+              p = subprocess.run(["sudo",tool,"-activate","-configure","-access","-on",
+                 "-users","runner","-privs","-ControlObserve","-clientopts","-setvnclegacy",
+                 "-vnclegacy","yes","-setvncpw","-vncpw",password],
+                 capture_output=True, timeout=45)
+              report["configure_returncode"] = p.returncode
+              # Report known warnings only; never publish command output/password.
+              msg = (p.stdout + p.stderr).decode("utf-8","replace")
+              report["permission_warning"] = "Screen recording might be disabled" in msg
+              report["control_warning"] = "Screen control might be disabled" in msg
+              for attempt in range(10):
+                  try:
+                      with socket.create_connection(("127.0.0.1",5900),timeout=2) as s:
+                          header = s.recv(12)
+                          report["rfb_header"] = header.decode("ascii","replace") if header.startswith(b"RFB ") else "unexpected"
+                          break
+                  except OSError:
+                      time.sleep(1)
+              else:
+                  report["rfb_header"] = None
+          finally:
+              subprocess.run(["sudo",tool,"-deactivate","-stop"],
+                             capture_output=True,timeout=30)
+              report["session_credentials_published"] = False
+              print(json.dumps(report, indent=2))
+          PY
