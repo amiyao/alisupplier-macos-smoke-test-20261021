@@ -5,6 +5,7 @@ import pathlib
 import platform
 import re
 import signal
+import sys
 import subprocess
 import time
 from private_desktop import ROOT, INSTALL, install_client
@@ -69,4 +70,6 @@ finally:
     pathlib.Path("evidence").mkdir(exist_ok=True)
     pathlib.Path("evidence/cli-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
+    if len(report["cases"]) != 3:
+        sys.exit(1)
 
