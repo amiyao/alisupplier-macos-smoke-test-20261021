@@ -1,0 +1,58 @@
+name: Temporary encrypted Mac validation session
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/private-desktop.yml]
+permissions:
+  contents: read
+concurrency:
+  group: private-mac-validation
+  cancel-in-progress: true
+jobs:
+  desktop:
+    if: github.event.repository.private == false
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Start bounded session with private key authentication
+        shell: bash
+        run: |
+          python3 -u private_desktop.py > "$RUNNER_TEMP/session-status.log" 2>&1 &
+          for i in $(seq 1 120); do
+            if test -f "$RUNNER_TEMP/private-desktop/ready"; then
+              echo 'Encrypted connection packet ready.'
+              exit 0
+            fi
+            if test -f "$RUNNER_TEMP/private-desktop/failed.json"; then
+              cat "$RUNNER_TEMP/private-desktop/failed.json"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo 'Setup timed out.'
+          exit 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-desktop-connection
+          path: ${{ runner.temp }}/private-desktop/connection.encrypted.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Keep isolated compatibility session available for up to 20 minutes
+        shell: bash
+        run: |
+          for i in $(seq 1 125); do
+            if test -f "$RUNNER_TEMP/private-desktop/finished.json"; then
+              cat "$RUNNER_TEMP/private-desktop/finished.json"
+              exit 0
+            fi
+            sleep 10
+          done
+      - name: Stop temporary screen access
+        if: always()
+        shell: bash
+        run: |
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop > /dev/null 2>&1
+
