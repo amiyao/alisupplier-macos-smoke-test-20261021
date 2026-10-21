@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import plistlib
 import re
 import secrets
@@ -108,7 +109,13 @@ def main():
         raise RuntimeError("disposable_mac_runner_required")
     stage = "dependencies"
     try:
-        run(["brew", "install", "bore-cli"], 420)
+        arch = "aarch64" if platform.machine() == "arm64" else "x86_64"
+        bore_archive = ROOT / "bore.tar.gz"
+        download(f"https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-{arch}-apple-darwin.tar.gz", bore_archive)
+        expected = {"aarch64": "65f43a67b90874700538bdb6064c5e92276e64dfba24f5cd72ef24a035eec3bc", "x86_64": "206db723a382bbc18d2893fc8472868e0b5f41de35975269aab7891ecc8659cc"}
+        if hashlib.sha256(bore_archive.read_bytes()).hexdigest() != expected[arch]:
+            raise RuntimeError("relay_binary_hash_mismatch")
+        run(["tar", "-xzf", str(bore_archive), "-C", str(ROOT)])
         env = ROOT / "venv"
         run([sys.executable, "-m", "venv", str(env)])
         py = str(env / "bin/python")
@@ -173,8 +180,11 @@ LogLevel ERROR
         run(["sudo", "/usr/sbin/sshd", "-t", "-f", str(conf)])
         spawn(["sudo", "/usr/sbin/sshd", "-D", "-e", "-f", str(conf)], "sshd")
         wait_port(22022)
+        with socket.create_connection(("127.0.0.1", 22022), 5) as probe:
+            if not probe.recv(128).startswith(b"SSH-"):
+                raise RuntimeError("local_ssh_banner_missing")
         stage = "relay"
-        bore = spawn(["bore", "local", "22022", "--to", "bore.pub"], "bore")
+        bore = spawn([str(ROOT / "bore"), "local", "22022", "--local-host", "127.0.0.1", "--to", "bore.pub"], "bore")
         port = None
         for _ in range(45):
             text = (ROOT / "bore.private.log").read_text(errors="replace")
@@ -187,6 +197,9 @@ LogLevel ERROR
             time.sleep(1)
         if port is None:
             raise RuntimeError("relay_timeout")
+        with socket.create_connection(("bore.pub", port), 10) as probe:
+            if not probe.recv(128).startswith(b"SSH-"):
+                raise RuntimeError("relay_ssh_banner_missing")
         stage = "handoff"
         # Host public key is delivered through authenticated GitHub, never trust-on-first-use.
         handoff = {"host": "bore.pub", "port": port, "user": "runner",
@@ -204,7 +217,12 @@ LogLevel ERROR
                 raise RuntimeError("session_service_exit")
             time.sleep(15)
     except Exception as exc:
-        (ROOT / "failed.json").write_text(json.dumps({"stage": stage, "error_type": type(exc).__name__, "reason": str(exc) if type(exc) is RuntimeError else "operation_failed"}))
+        failure = {"stage": stage, "error_type": type(exc).__name__, "reason": str(exc) if type(exc) is RuntimeError else "operation_failed"}
+        # SSH ERROR-level diagnostics contain no desktop, application, or credential data.
+        log = ROOT / "sshd.private.log"
+        if stage in ("ssh", "relay") and log.exists():
+            failure["ssh_diagnostic"] = log.read_text(errors="replace")[-1500:]
+        (ROOT / "failed.json").write_text(json.dumps(failure))
         print("Session stopped at stage=" + stage + "; error_type=" + type(exc).__name__, flush=True)
     finally:
         for p in reversed(PROCS):
