@@ -11,12 +11,14 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = pathlib.Path(os.environ["RUNNER_TEMP"]) / "private-desktop"
 ROOT.mkdir(mode=0o700, exist_ok=True)
 os.chmod(ROOT, 0o700)
 PROCS = []
+INSTALL = {"state": "pending"}
 KICK = "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 PUBLIC_SSH = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBqGYDti8Igcd2xUaIx5I7CiYNjYmWYYzNx4hx5AiLj/"
 
@@ -43,7 +45,7 @@ def wait_port(port):
     raise RuntimeError("local_service_unavailable:" + str(port))
 
 def download(url, target):
-    run(["curl", "-fsSL", "--retry", "2", "--max-time", "300", "-o", str(target), url], 330)
+    run(["curl", "-fsSL", "--connect-timeout", "20", "--retry", "2", "--max-time", "90", "--retry-max-time", "280", "-o", str(target), url], 330)
 
 def metadata():
     roots = [pathlib.Path.home() / v for v in (
@@ -78,7 +80,28 @@ def metadata():
             except OSError:
                 row["python_readable"] = False
             rows.append(row)
-    return {"timestamp": int(time.time()), "raw_contents_included": False, "files": rows}
+    return {"timestamp": int(time.time()), "installer": INSTALL.copy(), "raw_contents_included": False, "files": rows}
+
+def install_client():
+    try:
+        INSTALL["state"] = "downloading"
+        dmg = ROOT / "official.dmg"
+        download("https://alisupplierdownload.alibaba.com/download/AlibabaSupplier(11.45.90EM).dmg", dmg)
+        if hashlib.sha256(dmg.read_bytes()).hexdigest() != "345a05146106abc6dbc5564f319ebb7d5e49ad86d0380db45c779f439f297474":
+            raise RuntimeError("installer_hash_mismatch")
+        INSTALL["state"] = "verified_installing"
+        mounts = plistlib.loads(run(["hdiutil", "attach", "-readonly", "-nobrowse", "-plist", str(dmg)]))
+        app = next(a for e in mounts["system-entities"] if "mount-point" in e
+                   for a in pathlib.Path(e["mount-point"]).glob("*.app"))
+        dest = ROOT / app.name
+        run(["ditto", str(app), str(dest)])
+        run(["hdiutil", "detach", str(app.parent)])
+        run(["codesign", "--verify", "--deep", "--strict", str(dest)])
+        run(["spctl", "--assess", "--type", "execute", str(dest)])
+        run(["open", str(dest)])
+        INSTALL["state"] = "launched"
+    except Exception as exc:
+        INSTALL.update(state="failed", error_type=type(exc).__name__)
 
 def main():
     if sys.platform != "darwin" or os.getenv("GITHUB_ACTIONS") != "true":
@@ -94,20 +117,7 @@ def main():
         download("https://github.com/novnc/noVNC/archive/refs/tags/v1.7.0.tar.gz", archive)
         run(["tar", "-xzf", str(archive), "-C", str(ROOT)])
         web = ROOT / "noVNC-1.7.0"
-        stage = "installer"
-        dmg = ROOT / "official.dmg"
-        download("https://alisupplierdownload.alibaba.com/download/AlibabaSupplier(11.45.90EM).dmg", dmg)
-        if hashlib.sha256(dmg.read_bytes()).hexdigest() != "345a05146106abc6dbc5564f319ebb7d5e49ad86d0380db45c779f439f297474":
-            raise RuntimeError("installer_hash_mismatch")
-        mounts = plistlib.loads(run(["hdiutil", "attach", "-readonly", "-nobrowse", "-plist", str(dmg)]))
-        app = next(a for e in mounts["system-entities"] if "mount-point" in e
-                   for a in pathlib.Path(e["mount-point"]).glob("*.app"))
-        dest = ROOT / app.name
-        run(["ditto", str(app), str(dest)])
-        run(["hdiutil", "detach", str(app.parent)])
-        run(["codesign", "--verify", "--deep", "--strict", str(dest)])
-        run(["spctl", "--assess", "--type", "execute", str(dest)])
-        run(["open", str(dest)])
+        threading.Thread(target=install_client, daemon=True).start()
         stage = "desktop"
         password = secrets.token_hex(4)
         run(["sudo", KICK, "-activate", "-configure", "-access", "-on", "-users", "runner",
@@ -194,7 +204,7 @@ LogLevel ERROR
                 raise RuntimeError("session_service_exit")
             time.sleep(15)
     except Exception as exc:
-        (ROOT / "failed.json").write_text(json.dumps({"stage": stage, "error_type": type(exc).__name__}))
+        (ROOT / "failed.json").write_text(json.dumps({"stage": stage, "error_type": type(exc).__name__, "reason": str(exc) if type(exc) is RuntimeError else "operation_failed"}))
         print("Session stopped at stage=" + stage + "; error_type=" + type(exc).__name__, flush=True)
     finally:
         for p in reversed(PROCS):
