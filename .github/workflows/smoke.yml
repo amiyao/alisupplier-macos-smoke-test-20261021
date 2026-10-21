@@ -1,0 +1,32 @@
+name: No-login macOS log smoke test
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - smoke.py
+      - .github/workflows/smoke.yml
+permissions:
+  contents: read
+jobs:
+  smoke:
+    if: github.event.repository.private == false
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Launch official client without login and read logs
+        run: python3 smoke.py
+      - name: Save sanitized evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.os }}
+          path: evidence/report.json
+          if-no-files-found: warn
+          retention-days: 14
