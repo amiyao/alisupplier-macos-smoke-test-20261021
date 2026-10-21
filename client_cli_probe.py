@@ -1,14 +1,61 @@
 """Check actual terminal entry points; never supply account credentials."""
 import json
+import hashlib
 import os
 import pathlib
 import platform
+import plistlib
 import re
 import signal
 import sys
 import subprocess
 import time
-from private_desktop import ROOT, INSTALL, install_client
+ROOT = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client-cli-probe'
+ROOT.mkdir(mode=0o700,exist_ok=True)
+INSTALL = {}
+
+def checked(args,timeout=90):
+    p=subprocess.run(args,capture_output=True,timeout=timeout)
+    if p.returncode:
+        raise RuntimeError(pathlib.Path(args[0]).name+':exit='+str(p.returncode))
+    return p.stdout
+
+def install_client():
+    mount=None
+    try:
+        INSTALL['stage']='download'
+        dmg=ROOT/'official.dmg'
+        p=subprocess.run(['curl','-fsSL','--connect-timeout','30','--max-time','240',
+            '-w','%{http_code}','-o',str(dmg),
+            'https://alisupplierdownload.alibaba.com/download/AlibabaSupplier(11.45.90EM).dmg'],
+            capture_output=True,timeout=255)
+        INSTALL.update(download_exit=p.returncode,http_status=p.stdout.decode('ascii','replace')[-3:])
+        if p.returncode:
+            raise RuntimeError('official_download_failed')
+        INSTALL['stage']='hash'
+        digest=hashlib.sha256(dmg.read_bytes()).hexdigest()
+        INSTALL['sha256']=digest
+        if digest!='345a05146106abc6dbc5564f319ebb7d5e49ad86d0380db45c779f439f297474':
+            raise RuntimeError('installer_hash_mismatch')
+        INSTALL['stage']='mount_copy'
+        info=plistlib.loads(checked(['hdiutil','attach','-readonly','-nobrowse','-plist',str(dmg)]))
+        source=next(a for e in info['system-entities'] if 'mount-point' in e
+                    for a in pathlib.Path(e['mount-point']).glob('*.app'))
+        mount=source.parent
+        app=ROOT/source.name
+        checked(['ditto',str(source),str(app)],120)
+        INSTALL['stage']='signature'
+        checked(['codesign','--verify','--deep','--strict',str(app)])
+        checked(['spctl','--assess','--type','execute',str(app)])
+        INSTALL['stage']='launch'
+        checked(['open',str(app)],30)
+        INSTALL.update(state='launched',stage='ready')
+    except Exception as exc:
+        INSTALL.update(state='failed',error_type=type(exc).__name__,
+                       reason=str(exc) if type(exc) is RuntimeError else 'operation_failed')
+    finally:
+        if mount:
+            subprocess.run(['hdiutil','detach',str(mount)],capture_output=True,timeout=40)
 
 report = {"scope": "fresh Mac, help/version arguments only, no account login",
           "macos": platform.mac_ver()[0], "architecture": platform.machine(),
