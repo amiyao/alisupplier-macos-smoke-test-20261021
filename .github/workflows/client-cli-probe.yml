@@ -1,0 +1,25 @@
+name: Verify client terminal login interface
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/client-cli-probe.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.event.repository.private == false
+    runs-on: macos-15
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test vendor executable help and version entry points
+        run: python3 client_cli_probe.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: client-cli-capability
+          path: evidence/cli-report.json
+          retention-days: 7
+
