@@ -109,17 +109,12 @@ def main():
         raise RuntimeError("disposable_mac_runner_required")
     stage = "dependencies"
     try:
-        arch = "aarch64" if platform.machine() == "arm64" else "x86_64"
-        bore_archive = ROOT / "bore.tar.gz"
-        download(f"https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-{arch}-apple-darwin.tar.gz", bore_archive)
-        expected = {"aarch64": "65f43a67b90874700538bdb6064c5e92276e64dfba24f5cd72ef24a035eec3bc", "x86_64": "206db723a382bbc18d2893fc8472868e0b5f41de35975269aab7891ecc8659cc"}
-        if hashlib.sha256(bore_archive.read_bytes()).hexdigest() != expected[arch]:
-            raise RuntimeError("relay_binary_hash_mismatch")
-        run(["tar", "-xzf", str(bore_archive), "-C", str(ROOT)])
+        os.environ["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+        run(["brew", "install", "bore-cli"], 240)
         env = ROOT / "venv"
         run([sys.executable, "-m", "venv", str(env)])
         py = str(env / "bin/python")
-        run([py, "-m", "pip", "install", "--disable-pip-version-check", "websockify==0.13.0"], 180)
+        run([py, "-m", "pip", "install", "--disable-pip-version-check", "websockify==0.13.0", "asyncssh==2.24.1"], 180)
         archive = ROOT / "novnc.tar.gz"
         download("https://github.com/novnc/noVNC/archive/refs/tags/v1.7.0.tar.gz", archive)
         run(["tar", "-xzf", str(archive), "-C", str(ROOT)])
@@ -150,41 +145,13 @@ document.getElementById('disconnect').onclick=()=>r.disconnect();
         stage = "ssh"
         hostkey = ROOT / "hostkey"
         run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(hostkey)])
-        auth = ROOT / "authorized_keys"
-        auth.write_text('restrict,port-forwarding,permitopen="127.0.0.1:6080" ' + PUBLIC_SSH + '\n')
-        auth.chmod(0o600)
-        conf = ROOT / "sshd_config"
-        conf.write_text(f'''Port 22022
-ListenAddress 127.0.0.1
-HostKey {hostkey}
-PidFile {ROOT / "sshd.pid"}
-AuthorizedKeysFile {auth}
-AllowUsers runner
-AuthenticationMethods publickey
-PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PermitRootLogin no
-UsePAM yes
-StrictModes yes
-AllowTcpForwarding local
-PermitOpen 127.0.0.1:6080
-AllowAgentForwarding no
-X11Forwarding no
-PermitTunnel no
-PermitUserRC no
-GatewayPorts no
-MaxSessions 0
-LogLevel ERROR
-''')
-        run(["sudo", "/usr/sbin/sshd", "-t", "-f", str(conf)])
-        spawn(["sudo", "/usr/sbin/sshd", "-D", "-e", "-f", str(conf)], "sshd")
+        spawn([py, "desktop_bridge.py", str(hostkey)], "sshd")
         wait_port(22022)
         with socket.create_connection(("127.0.0.1", 22022), 5) as probe:
             if not probe.recv(128).startswith(b"SSH-"):
                 raise RuntimeError("local_ssh_banner_missing")
         stage = "relay"
-        bore = spawn([str(ROOT / "bore"), "local", "22022", "--local-host", "127.0.0.1", "--to", "bore.pub"], "bore")
+        bore = spawn(["bore", "local", "22022", "--local-host", "127.0.0.1", "--to", "bore.pub"], "bore")
         port = None
         for _ in range(45):
             text = (ROOT / "bore.private.log").read_text(errors="replace")
