@@ -1,0 +1,46 @@
+name: Interactive desktop readiness
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/desktop-readiness.yml]
+permissions:
+  contents: read
+jobs:
+  readiness:
+    if: github.event.repository.private == false
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Inspect existing desktop permissions without changing them
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, platform, socket, subprocess
+          result = {"macos": platform.mac_ver()[0], "arch": platform.machine()}
+          with socket.socket() as s:
+              s.settimeout(2)
+              result["existing_vnc_listener"] = s.connect_ex(("127.0.0.1",5900)) == 0
+          for name, cmd in {
+              "screensharing_service": ["launchctl","print","system/com.apple.screensharing"],
+              "screen_sharing_preferences": ["defaults","read","/Library/Preferences/com.apple.RemoteManagement","ARD_AllLocalUsers"],
+          }.items():
+              p = subprocess.run(cmd, capture_output=True)
+              result[name] = {"returncode": p.returncode}
+          pathlib.Path("desktop-check.json").write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+          cat > "$RUNNER_TEMP/desktop-check.swift" <<'SWIFT'
+          import AppKit
+          import ApplicationServices
+          import CoreGraphics
+          import Foundation
+          let value: [String: Any] = [
+            "screen_capture_permission": CGPreflightScreenCaptureAccess(),
+            "accessibility_permission": AXIsProcessTrusted(),
+            "display_count": NSScreen.screens.count,
+            "interactive_session": CGSessionCopyCurrentDictionary() != nil
+          ]
+          let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+          print(String(data: data, encoding: .utf8)!)
+          SWIFT
+          swift "$RUNNER_TEMP/desktop-check.swift"
